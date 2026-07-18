@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Avance de metas</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root{
     --ink:#1B2430; --paper:#F2F4F1; --card:#fff; --line:#EEF0EC; --muted:#6B7280;
@@ -79,9 +80,22 @@
       <button class="tab" data-v="dashboard" onclick="ir('dashboard')">Dashboard</button>
       <button class="tab solo-editor" data-v="captura" onclick="ir('captura')">Registrar</button>
       <button class="tab" data-v="dias" onclick="ir('dias')">Días</button>
+      <button class="tab" data-v="graficos" onclick="ir('graficos')">Gráficos</button>
       <button class="tab solo-editor" data-v="ajustes" onclick="ir('ajustes')">Ajustes</button>
     </div>
   </header>
+
+  <!-- GRÁFICOS -->
+  <section id="v-graficos" class="hide">
+    <div class="card"><div class="ctitle">Alto Bnas: acumulado vs. meta</div>
+      <div style="position:relative;height:240px"><canvas id="ch-alto"></canvas></div></div>
+    <div class="card"><div class="ctitle">Venta diaria total vs. meta diaria</div>
+      <div style="position:relative;height:240px"><canvas id="ch-diaria"></canvas></div></div>
+    <div class="card"><div class="ctitle">Evolución del acumulado por tienda</div>
+      <div style="position:relative;height:260px"><canvas id="ch-tiendas"></canvas></div></div>
+    <div class="card"><div class="ctitle">Acumulado vs. meta acumulada</div>
+      <div style="position:relative;height:260px"><canvas id="ch-barras"></canvas></div></div>
+  </section>
 
   <!-- REGISTRAR -->
   <section id="v-captura" class="card hide">
@@ -215,15 +229,84 @@ async function enviar(payload){
 // ===== Vistas =====
 function ir(v){
   VISTA=v;
-  for(const s of ["captura","dashboard","dias","ajustes"]) $("v-"+s).classList.toggle("hide", s!==v);
+  for(const s of ["captura","dashboard","dias","graficos","ajustes"]) $("v-"+s).classList.toggle("hide", s!==v);
   document.querySelectorAll(".tab[data-v]").forEach(b=>b.classList.toggle("on", b.dataset.v===v));
   if(v==="captura") pintarForm();
+  if(v==="graficos") pintarGraficos();
 }
 
 function pintarTodo(){
   $("eyebrow").textContent = `${nombreMes(MES)} · META MENSUAL ALTO BNAS ${fmt(META_ALTO*diasDelMes(MES))}`;
   pintarDias(); pintarDash();
   if(VISTA==="captura") pintarForm();
+  if(VISTA==="graficos") pintarGraficos();
+}
+
+// ===== Gráficos (espejo de los 4 del Excel) =====
+const COLORES = {dorado:"#B8860B", fiorillo:"#C4442A", cima:"#0E7C4A", centro:"#4B6B8A", alto:"#14213D", meta:"#9CA3AF"};
+let CHARTS = {};
+function nuevoChart(id, cfg){
+  if(CHARTS[id]) CHARTS[id].destroy();
+  CHARTS[id] = new Chart($(id).getContext("2d"), cfg);
+}
+function pintarGraficos(){
+  if(typeof Chart === "undefined") return; // sin internet para la librería
+  const c = calcular();
+  const nMes = c.nMes, mesD = c.mesD;
+  const regs = Object.keys(mesD).map(Number);
+  const ultimo = regs.length ? Math.max(...regs) : 0;
+  const dias = Array.from({length:nMes}, (_,i)=>i+1);
+  const etiquetas = dias.map(String);
+
+  // Series acumuladas por tienda (se cortan tras el último día registrado, como en el Excel)
+  const acumSeries = {dorado:[], fiorillo:[], cima:[], centro:[], alto:[]};
+  const run = {dorado:0, fiorillo:0, cima:0, centro:0};
+  const ventaDiaria = [], metaAcumAlto = [];
+  for(const d of dias){
+    const r = mesD[d];
+    if(r){ for(const t of TIENDAS) run[t.id]+= r[t.id]||0; }
+    const corta = d<=ultimo ? null : undefined;
+    acumSeries.dorado.push(d<=ultimo?run.dorado:null);
+    acumSeries.fiorillo.push(d<=ultimo?run.fiorillo:null);
+    acumSeries.cima.push(d<=ultimo?run.cima:null);
+    acumSeries.centro.push(d<=ultimo?run.centro:null);
+    acumSeries.alto.push(d<=ultimo?run.dorado+run.fiorillo+run.cima:null);
+    ventaDiaria.push(r ? ALTO.reduce((s,id)=>s+(r[id]||0),0)+(r.centro||0) : null);
+    metaAcumAlto.push(META_ALTO*d);
+  }
+  const base = {responsive:true, maintainAspectRatio:false,
+    interaction:{mode:"index", intersect:false},
+    plugins:{legend:{position:"bottom", labels:{boxWidth:12, font:{size:11}}}},
+    scales:{x:{ticks:{maxTicksLimit:11, font:{size:10}}, grid:{display:false}},
+            y:{ticks:{font:{size:10}, callback:v=>v.toLocaleString("es-MX")}}}};
+
+  // 1) Alto Bnas: acumulado vs meta (hacia la meta del mes)
+  nuevoChart("ch-alto", {type:"line", data:{labels:etiquetas, datasets:[
+    {label:"Alto Bnas", data:acumSeries.alto, borderColor:COLORES.alto, backgroundColor:COLORES.alto, borderWidth:2.5, pointRadius:0, tension:.2, spanGaps:false},
+    {label:"Meta acum. ("+fmt(META_ALTO*nMes)+")", data:metaAcumAlto, borderColor:COLORES.meta, borderDash:[6,4], borderWidth:1.5, pointRadius:0}
+  ]}, options:base});
+
+  // 2) Venta diaria total vs meta diaria
+  nuevoChart("ch-diaria", {type:"bar", data:{labels:etiquetas, datasets:[
+    {type:"bar", label:"Venta diaria", data:ventaDiaria,
+      backgroundColor:ventaDiaria.map(v=>v==null?"#ddd":(v>=META_TOTAL?"rgba(14,124,74,.75)":"rgba(196,68,42,.7)"))},
+    {type:"line", label:"Meta diaria ("+fmt(META_TOTAL)+")", data:dias.map(()=>META_TOTAL),
+      borderColor:COLORES.meta, borderDash:[6,4], borderWidth:1.5, pointRadius:0}
+  ]}, options:base});
+
+  // 3) Evolución del acumulado por tienda
+  nuevoChart("ch-tiendas", {type:"line", data:{labels:etiquetas, datasets:
+    TIENDAS.map(t=>({label:t.nombre, data:acumSeries[t.id], borderColor:COLORES[t.id],
+      backgroundColor:COLORES[t.id], borderWidth:2, pointRadius:0, tension:.2, spanGaps:false}))
+  }, options:base});
+
+  // 4) Acumulado vs meta acumulada por tienda
+  const filas = c.filas;
+  nuevoChart("ch-barras", {type:"bar", data:{labels:filas.map(f=>f.label.replace(" (Dor+Fio+Cima)","")), datasets:[
+    {label:"Acumulado", data:filas.map(f=>f.acum), backgroundColor:"rgba(20,33,61,.8)"},
+    {label:"Meta acum.", data:filas.map(f=>f.metaAcum), backgroundColor:"rgba(156,163,175,.55)"}
+  ]}, options:{...base, indexAxis:"y",
+    scales:{x:{ticks:{font:{size:10}, callback:v=>v.toLocaleString("es-MX")}}, y:{ticks:{font:{size:10}}, grid:{display:false}}}}});
 }
 
 // --- Captura ---
